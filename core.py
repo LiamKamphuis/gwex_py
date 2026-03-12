@@ -331,8 +331,10 @@ def fit_gwex_model(
         from .precipitation import fit_GWex_prec
         fit_result = fit_GWex_prec(obs, par_margin, list_option)
     elif type_var == 'Temp':
-        from .temperature import fit_GWex_temp
-        fit_result = fit_GWex_temp(obs, list_option)
+        raise NotImplementedError(
+            "Temperature model is not yet implemented in gwex_py. "
+            "Only precipitation ('Prec') is currently supported."
+        )
     else:
         raise ValueError(f"Unsupported variable type: {type_var}")
 
@@ -402,20 +404,23 @@ def sim_gwex_model(
     type_var = fit.variable
     p = fit.n_stations
 
-    # Set default dates if not provided
+    # Resolve d_start to a definite datetime64[D] (avoids Pylance Optional narrowing issues)
     if d_start is None:
-        d_start = np.datetime64('1900-01-01', 'D')
-    if d_end is None:
-        d_end = np.datetime64('1999-12-31', 'D')
+        d_start_dt: np.datetime64 = np.datetime64('1900-01-01', 'D')
+    elif isinstance(d_start, np.datetime64):
+        d_start_dt = d_start.astype('datetime64[D]')
+    else:
+        d_start_dt = np.datetime64(str(d_start), 'D')
 
-    # Ensure dates are datetime64[D]
-    if not np.issubdtype(type(d_start), np.datetime64):
-        d_start = np.datetime64(d_start, 'D')
-    if not np.issubdtype(type(d_end), np.datetime64):
-        d_end = np.datetime64(d_end, 'D')
+    if d_end is None:
+        d_end_dt: np.datetime64 = np.datetime64('1999-12-31', 'D')
+    elif isinstance(d_end, np.datetime64):
+        d_end_dt = d_end.astype('datetime64[D]')
+    else:
+        d_end_dt = np.datetime64(str(d_end), 'D')
 
     # Create date vector
-    vec_dates = np.arange(d_start, d_end + np.timedelta64(1, 'D'), dtype='datetime64[D]')
+    vec_dates = np.arange(d_start_dt, d_end_dt + np.timedelta64(1, 'D'), dtype='datetime64[D]')
 
     # Set default probability classes
     if prob_class is None:
@@ -457,20 +462,23 @@ def sim_gwex_model(
         # Call simulation function based on variable type
         if type_var == 'Prec':
             from .precipitation import sim_GWex_prec_1it
+            # precipitation.py expects raw dicts, not dataclasses:
+            #   objGwexFit -> fit.fit (the inner dict with 'listOption' and 'listPar')
+            #   objGwexObs -> {'obs': ..., 'date': ...} or None
+            #   myseed     -> int (None becomes 0 = unseeded equivalent)
+            obs_dict = {'obs': obs.obs, 'date': obs.date} if obs is not None else None
             sim_out[:, :, i_sim] = sim_GWex_prec_1it(
-                fit, vec_dates, myseed=seed, obj_obs=obs, prob_class=prob_class
+                fit.fit,
+                vec_dates,
+                myseed=seed if seed is not None else 0,
+                objGwexObs=obs_dict,
+                prob_class=prob_class,
             )
         elif type_var == 'Temp':
-            from .temperature import sim_GWex_temp_1it
-
-            # Extract precipitation slice if conditional
-            if sim_prec_data is not None:
-                mat_sim_prec = sim_prec_data[:, :, i_sim:i_sim+1]
-            else:
-                mat_sim_prec = None
-
-            result = sim_GWex_temp_1it(fit, vec_dates, myseed=seed, mat_sim_prec=mat_sim_prec)
-            sim_out[:, :, i_sim] = result['Tdetrend']
+            raise NotImplementedError(
+                "Temperature simulation is not yet implemented in gwex_py. "
+                "Only precipitation ('Prec') is currently supported."
+            )
 
     # Create and return GwexSim object
     return GwexSim(

@@ -247,7 +247,7 @@ def find_omega(
             return cor_emp_occ(w, Qtrans_mat, mat_comb, nLag, nChainFit) - rho_emp
 
         try:
-            omega = brentq(objective, rho_emp, 1.0, xtol=1e-3)
+            omega: float = brentq(objective, rho_emp, 1.0, xtol=1e-3, full_output=False)  # type: ignore[assignment]
         except ValueError:
             # If brentq fails, return boundary value
             omega = 1.0 if f_sup > 0 else 0.0
@@ -418,7 +418,7 @@ def find_zeta(
             return cor_emp_int(z, nChainFit, Xt, parMargin, typeMargin) - eta_emp
 
         try:
-            zeta = brentq(objective, eta_emp, 1.0, xtol=1e-3)
+            zeta: float = brentq(objective, eta_emp, 1.0, xtol=1e-3, full_output=False)  # type: ignore[assignment]
         except ValueError:
             zeta = 1.0 if f_sup > 0 else 0.0
 
@@ -570,7 +570,7 @@ def find_autocor(
             return autocor_emp_int(rho, nChainFit, Xt, parMargin, typeMargin) - autocor_emp
 
         try:
-            rho = brentq(objective, -0.99, 0.99, xtol=1e-3)
+            rho: float = brentq(objective, -0.99, 0.99, xtol=1e-3, full_output=False)  # type: ignore[assignment]
         except ValueError:
             rho = 0.0
 
@@ -649,7 +649,7 @@ def infer_autocor_amount(
     nChainFit: int,
     is_MAR: bool,
     is_parallel: bool = False
-) -> Dict:
+) -> Optional[Dict]:
     """
     Estimate spatial dependence parameters for single-station case.
 
@@ -691,7 +691,7 @@ def infer_autocor_amount(
 def infer_dep_amount(
     P_mat: np.ndarray,
     is_period: np.ndarray,
-    infer_mat_omega_out: Dict,
+    infer_mat_omega_out: Optional[Dict],
     nLag: int,
     th: float,
     parMargin: np.ndarray,
@@ -874,18 +874,21 @@ def fit_GWex_prec(
     listOption = get_list_option(listOption)
 
     # ========== Retrieve observations and dates ==========
+    obs_data = objGwexObs.obs
+    obs_date = objGwexObs.date
+
     if listOption.get('is3Damount', False):
         # Aggregate to 3-day precipitation
-        P_1D = objGwexObs['obs']
+        P_1D = obs_data
         P_mat = agg_matrix(P_1D, 3)
 
         # Adjust dates to 3-day periods
         n = P_1D.shape[0]
-        vec_dates = objGwexObs['date'][::3][:n // 3]
+        vec_dates = obs_date[::3][:n // 3]
         day_scale = 3
     else:
-        P_mat = objGwexObs['obs']
-        vec_dates = objGwexObs['date']
+        P_mat = obs_data
+        vec_dates = obs_date
         day_scale = 1
 
     # ========== Process dates and periods ==========
@@ -1122,13 +1125,13 @@ def sim_GWex_Yt_Pr(
     # Prepare output matrix
     Yt_Gau = np.zeros((n, p))
 
+    # Initialise par so it is always bound before the loop body uses it
+    par: Dict = _sim_GWex_Yt_Pr_get_param(objGwexFit, vecMonth[0] - 1)
+
     # First time step: simulate from marginal distribution
     if p == 1:
         Yt_Gau[0, :] = np.random.randn(1)
     else:
-        # Get parameters for month of first day
-        iMonth = vecMonth[0] - 1
-        par = _sim_GWex_Yt_Pr_get_param(objGwexFit, iMonth)
         Yt_Gau[0, :] = _sim_Zt_Spatial(par, copulaInt, p)
 
     # Subsequent time steps
@@ -1268,7 +1271,7 @@ def sim_GWex_prec_1it(
     if is_3D_amount:
         n_orig = len(vecDates)
         n = int(np.ceil(n_orig / 3) * 3)
-        vecDates = list(vecDates) + list(vecDates[-3:])  # Pad if needed
+        vecDates = np.concatenate([vecDates, vecDates[-3:]])  # Pad to multiple of 3
         vecDates = vecDates[::3][:n // 3]
 
     # Extract month information

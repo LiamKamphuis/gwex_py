@@ -33,7 +33,7 @@ import numpy as np
 from scipy.special import beta
 from scipy.stats import genpareto, uniform
 from scipy.optimize import fsolve, brentq
-from typing import Tuple, Union
+from typing import Optional, Tuple, Union
 
 
 # =============================================================================
@@ -213,7 +213,7 @@ def rvs_egpd_gi(
     kappa: float,
     sig: float,
     xi: float,
-    random_state: int = None
+    random_state: Optional[int] = None
 ) -> np.ndarray:
     """
     Generate random samples from the EGPD.GI distribution.
@@ -238,7 +238,7 @@ def rvs_egpd_gi(
     """
     rng = np.random.RandomState(random_state)
     u = rng.uniform(0, 1, n)
-    return ppf_egpd_gi(u, kappa, sig, xi)
+    return np.asarray(ppf_egpd_gi(u, kappa, sig, xi))
 
 
 # =============================================================================
@@ -619,7 +619,7 @@ def rvs_mixexp(
     prob: float,
     rate1: float,
     rate2: float,
-    random_state: int = None
+    random_state: Optional[int] = None
 ) -> np.ndarray:
     """
     Generate random samples from mixture of exponentials.
@@ -644,7 +644,7 @@ def rvs_mixexp(
     """
     rng = np.random.RandomState(random_state)
     u = rng.uniform(0, 1, n)
-    return ppf_mixexp(u, prob, rate1, rate2)
+    return np.asarray(ppf_mixexp(u, prob, rate1, rate2))
 
 
 # =============================================================================

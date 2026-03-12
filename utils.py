@@ -113,8 +113,9 @@ def lag_trans_proba_vector(vec_prec, is_period, th, nlag):
     # Compute conditional probabilities: Pr(t0=wet | t-nlag,...,t-1)
     # Split into FALSE and TRUE for current day (t0, last column before P)
     n_pr = len(comb_pr)
-    pr_f = comb_pr['P'].iloc[:n_pr//2].values
-    pr_t = comb_pr['P'].iloc[n_pr//2:].values
+    # Cast to float ndarray explicitly so Pylance doesn't infer ExtensionArray
+    pr_f = np.asarray(comb_pr['P'].iloc[:n_pr//2].values, dtype=float)
+    pr_t = np.asarray(comb_pr['P'].iloc[n_pr//2:].values, dtype=float)
 
     # Conditional probability: P(t0=1 | past)
     pr_cond = pr_t / (pr_f + pr_t)
