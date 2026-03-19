@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+./__init__.py
+./core.py
+./distributions.py
+./load_ideam_data.py
+./precipitation.py
+./simulation.py
+./utils.py
+gwex_py.egg-info/PKG-INFO
+gwex_py.egg-info/SOURCES.txt
+gwex_py.egg-info/dependency_links.txt
+gwex_py.egg-info/requires.txt
+gwex_py.egg-info/top_level.txt

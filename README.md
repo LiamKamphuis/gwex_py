@@ -291,22 +291,27 @@ Each slice `sim.sim[:, :, i]` is one independent synthetic daily precipitation r
 Running GWEX on your observed record answers the following questions:
 
 **About rainfall occurrence:**
+
 - How likely is it to rain at each station in each calendar month?
 - If it rains today, how much more likely is it to rain tomorrow? (persistence)
 - How correlated are wet/dry states across the station network?
 
 **About rainfall amounts:**
+
 - What is the full marginal distribution of wet-day amounts, including the heavy tail, at each station in each month?
 - How well does an EGPD or mixture-of-exponentials fit the observed amounts?
 
 **About spatial structure:**
+
 - How strongly are rainfall amounts co-varying across the network?
 - Which pairs of stations share the most spatially coherent rainfall signals? (useful for regionalisation)
 
 **About temporal structure:**
+
 - Is there significant multi-day autocorrelation in rainfall amounts beyond what the Markov chain captures?
 
 **From the synthetic ensemble:**
+
 - What are the T-year return-level estimates for daily totals at each station and for spatially averaged totals?
 - What is the uncertainty range around those return levels?
 - What is the joint probability of exceeding a threshold simultaneously at multiple stations (relevant for catchment-wide flood risk)?
@@ -397,6 +402,7 @@ print(f"100-year daily rainfall at station 0: {T100:.1f} mm")
 ```python
 fit_gwex_model(obs: GwexObs, options: dict) -> GwexFit
 ```
+
 Fits a GWEX precipitation model to observed data. Returns a `GwexFit` containing all estimated parameters.
 
 ```python
@@ -409,6 +415,7 @@ sim_gwex_model(
     obs:     Optional[GwexObs] = None,
 ) -> GwexSim
 ```
+
 Generates `n_sim` independent synthetic precipitation realisations over the specified date range.
 
 ### `distributions.py`
@@ -416,16 +423,19 @@ Generates `n_sim` independent synthetic precipitation realisations over the spec
 ```python
 fit_egpd_gi_pwm(data: np.ndarray) -> tuple[float, float, float]
 ```
+
 Fits EGPD parameters `(kappa, sigma, xi)` by probability-weighted moments.
 
 ```python
 ppf_egpd_gi(u: np.ndarray, kappa: float, sigma: float, xi: float) -> np.ndarray
 ```
+
 Quantile function (inverse CDF) of the EGPD; maps uniform variates to rainfall amounts.
 
 ```python
 fit_margin_cdf(obs: np.ndarray, dates: np.ndarray, options: dict) -> dict
 ```
+
 Fits marginal distributions month-by-month for all stations; returns parameter arrays and model-type indicators.
 
 ### `precipitation.py`
@@ -433,6 +443,7 @@ Fits marginal distributions month-by-month for all stations; returns parameter a
 ```python
 fit_GWex_prec(objGwexObs: GwexObs, options: dict) -> dict
 ```
+
 Full fitting pipeline for multi-site precipitation. Returns the complete nested parameter dict.
 
 ```python
@@ -444,6 +455,7 @@ sim_GWex_prec_1it(
     prob_class: Optional[np.ndarray] = None,
 ) -> np.ndarray
 ```
+
 Simulates one realisation of daily precipitation. Returns array of shape `(T, S)`.
 
 ### `utils.py`
@@ -451,20 +463,22 @@ Simulates one realisation of daily precipitation. Returns array of shape `(T, S)
 ```python
 get_transition_probs(obs: np.ndarray, th: float = 0.2) -> tuple[np.ndarray, np.ndarray]
 ```
+
 Returns `(p01, p11)` arrays of shape `(12, S)`.
 
 ```python
 repair_cor_matrix(mat: np.ndarray) -> np.ndarray
 ```
+
 Projects a matrix to the nearest valid correlation matrix (eigenvalue flooring + rescaling).
 
 ---
 
 ## References
 
-- Evin, G., Favre, A.-C., & Hingray, B. (2018). Stochastic generation of multi-site daily precipitation focusing on extreme events. *Hydrology and Earth System Sciences*, 22(1), 655–672. https://doi.org/10.5194/hess-22-655-2018
+- Evin, G., Favre, A.-C., & Hingray, B. (2018). Stochastic generation of multi-site daily precipitation focusing on extreme events. *Hydrology and Earth System Sciences*, 22(1), 655–672. <https://doi.org/10.5194/hess-22-655-2018>
 - Naveau, P., Huser, R., Ribereau, P., & Hannart, A. (2016). Modeling jointly low, moderate, and heavy rainfall intensities without a threshold selection. *Water Resources Research*, 52(4), 2753–2769.
-- Original R package: https://github.com/guillaumeevin/GWEX
+- Original R package: <https://github.com/guillaumeevin/GWEX>
 
 ---
 

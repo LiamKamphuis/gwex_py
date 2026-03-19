@@ -39,7 +39,8 @@ from .utils import (
     modify_cor_matrix, dry_day_frequency, wet_day_frequency,
     joint_proba_occ, cor_obs_occ, lag_trans_proba_matrix,
     get_emp_cdf_matrix, get_list_option, get_list_month,
-    get_period_fitting_month, month2season, agg_matrix
+    get_period_fitting_month, month2season, agg_matrix,
+    get_df_student
 )
 from .distributions import (
     unif_to_prec, fit_margin_cdf, ppf_egpd_gi, cdf_mixexp
@@ -317,61 +318,89 @@ def cor_emp_occ(
 
 
 def get_M0(
-    cor_obs: np.ndarray,
-    infer_mat_omega_out: Dict,
-    nLag: int,
+    P_mat: np.ndarray,
+    is_period: np.ndarray,
+    th: float,
     parMargin: np.ndarray,
     typeMargin: str,
     nChainFit: int,
+    nLag: int,
+    infer_mat_omega_out: Optional[Dict] = None,
     is_parallel: bool = False
-) -> Dict:
+) -> np.ndarray:
     """
-    Find covariance matrix M0 for gaussianized precipitation amounts.
+    Estimate the Gaussian covariance matrix M0 for precipitation intensities.
 
-    Estimates the covariance matrix of the Gaussian variates that drive
-    the multivariate intensity process, given observed correlations between
-    precipitation amounts.
+    For each station pair (i, j), computes the observed Pearson correlation
+    of wet-day intensities on jointly-wet days, then calls find_zeta to find
+    the latent Gaussian correlation that reproduces it via simulation matching.
+    Assembles pairwise values into M0 and ensures positive-definiteness.
 
     Parameters
     ----------
-    cor_obs : ndarray, shape (n_stations, n_stations)
-        Observed correlations between intensities
-    infer_mat_omega_out : dict
-        Output from infer_mat_omega, containing Qtrans_mat, mat_comb, mat_omega
-    nLag : int
-        Number of lag days for Markov chain
+    P_mat : ndarray, shape (n_days, n_stations)
+        Precipitation matrix
+    is_period : ndarray, shape (n_days,)
+        Boolean mask for the 3-month fitting window
+    th : float
+        Wet/dry threshold
     parMargin : ndarray, shape (n_stations, 3)
-        Parameters of marginal distributions
+        Marginal parameters per station
     typeMargin : str
         Type of margin ('EGPD' or 'mixExp')
     nChainFit : int
-        Number of chain steps
+        Number of chain steps for simulation matching
+    nLag : int
+        Number of lag days for Markov chain
+    infer_mat_omega_out : dict, optional
+        Output from infer_mat_omega (used for generating occurrence patterns)
     is_parallel : bool, optional
         Whether to use parallel computation
 
     Returns
     -------
-    dict
-        Dictionary with keys:
-        - 'M0': Covariance matrix of Gaussian variates
-        - 'mat_comb': Combination matrix
-        - 'mat_omega': Spatial correlation matrix
+    ndarray, shape (n_stations, n_stations)
+        Positive-definite Gaussian covariance matrix M0
     """
-    p = cor_obs.shape[0]
-
-    # Extract Gaussian variates that produce observed correlations
-    # This is the inverse of the copula transformation
-    # Use Student-t copula if available, otherwise Gaussian
-
-    # Initialize M0 as identity (will be refined)
-    # For now, return identity as placeholder
+    P_period = P_mat[is_period, :]
+    p = P_period.shape[1]
     M0 = np.eye(p)
 
-    return {
-        'M0': M0,
-        'mat_comb': infer_mat_omega_out['mat_comb'],
-        'mat_omega': infer_mat_omega_out['mat_omega']
-    }
+    # Observed occurrence pattern for simulation matching
+    Xt_obs = (P_period > th).astype(float)
+
+    for i, j in combinations(range(p), 2):
+        # Observed correlation on jointly-wet days
+        wet_both = (Xt_obs[:, i] == 1) & (Xt_obs[:, j] == 1)
+        n_joint = np.sum(wet_both)
+        if n_joint > 10:
+            cor_ij = np.corrcoef(P_period[wet_both, i], P_period[wet_both, j])[0, 1]
+            if np.isnan(cor_ij):
+                cor_ij = 0.0
+        else:
+            cor_ij = 0.0
+
+        if abs(cor_ij) < 1e-6:
+            M0[i, j] = M0[j, i] = 0.0
+            continue
+
+        # Use simulated occurrence pattern from omega (if available)
+        # or fall back to observed occurrence pattern
+        Xt_pair = Xt_obs[:min(nChainFit, len(Xt_obs)), [i, j]]
+
+        zeta = find_zeta(
+            eta_emp=cor_ij,
+            nChainFit=len(Xt_pair),
+            Xt=Xt_pair,
+            parMargin=parMargin[[i, j], :],
+            typeMargin=typeMargin
+        )
+        M0[i, j] = M0[j, i] = zeta
+
+    # Ensure positive-definiteness
+    M0 = modify_cor_matrix(M0)
+
+    return M0
 
 
 def find_zeta(
@@ -682,7 +711,8 @@ def infer_autocor_amount(
         Dictionary with fitted parameters for intensity process
     """
     if is_MAR:
-        return fit_MAR1_amount(P_mat, is_period, th, parMargin, typeMargin)
+        return fit_MAR1_amount(P_mat, is_period, th, parMargin, typeMargin,
+                               nChainFit=nChainFit, nLag=nLag)
     else:
         # No spatial dependence for single station
         return None
@@ -735,7 +765,8 @@ def infer_dep_amount(
         Dictionary with fitted intensity dependence parameters
     """
     if is_MAR:
-        return fit_MAR1_amount(P_mat, is_period, th, parMargin, typeMargin)
+        return fit_MAR1_amount(P_mat, is_period, th, parMargin, typeMargin,
+                               nChainFit=nChainFit, nLag=nLag)
     else:
         return fit_copula_amount(
             P_mat, is_period, nLag, th, parMargin, typeMargin, nChainFit, copulaInt
@@ -753,42 +784,64 @@ def fit_copula_amount(
     copulaInt: str
 ) -> Dict:
     """
-    Fit copula parameters for precipitation amounts.
+    Fit copula parameters for precipitation intensities (no temporal dependence).
+
+    Estimates the spatial dependence structure via simulation matching:
+    for each station pair, finds the latent Gaussian correlation that
+    reproduces the observed wet-day intensity correlation. Optionally
+    estimates Student-t degrees of freedom for upper tail dependence.
 
     Parameters
     ----------
-    P_mat : ndarray
+    P_mat : ndarray, shape (n_days, n_stations)
         Precipitation matrix
     is_period : ndarray
-        Boolean mask for period
+        Boolean mask for 3-month fitting window
     nLag : int
         Number of lag days
     th : float
         Wet/dry threshold
-    parMargin : ndarray
+    parMargin : ndarray, shape (n_stations, 3)
         Marginal parameters
     typeMargin : str
-        Type of margin
+        Type of margin ('EGPD' or 'mixExp')
     nChainFit : int
-        Number of chain steps
+        Number of chain steps for simulation matching
     copulaInt : str
-        Type of copula
+        Type of copula ('Gaussian' or 'Student')
 
     Returns
     -------
     dict
-        Fitted copula parameters
+        Keys: 'M0', 'A', 'covZ', 'sdZ', 'corZ', and optionally 'df'
     """
-    # Placeholder for copula fitting
-    # In practice, this would estimate dependence structure between amounts
     p = P_mat.shape[1]
-    return {
-        'M0': np.eye(p),
+
+    # Estimate M0 via simulation matching
+    M0 = get_M0(P_mat, is_period, th, parMargin, typeMargin, nChainFit, nLag)
+
+    sdZ = np.sqrt(np.diag(M0))
+    corZ = M0.copy()
+
+    result = {
+        'M0': M0,
         'A': np.zeros((p, p)),
-        'covZ': np.eye(p),
-        'sdZ': np.ones(p),
-        'corZ': np.eye(p)
+        'covZ': M0,
+        'sdZ': sdZ,
+        'corZ': corZ
     }
+
+    # Estimate Student-t degrees of freedom if requested
+    if copulaInt == 'Student':
+        P_period = P_mat[is_period, :]
+        # Extract wet-day data for df estimation
+        wet_all = np.all(P_period > th, axis=1)
+        P_wet = P_period[wet_all, :]
+        if P_wet.shape[0] > 20:
+            df = get_df_student(P_wet, corZ)
+            result['df'] = df
+
+    return result
 
 
 def fit_MAR1_amount(
@@ -796,39 +849,85 @@ def fit_MAR1_amount(
     is_period: np.ndarray,
     th: float,
     parMargin: np.ndarray,
-    typeMargin: str
+    typeMargin: str,
+    nChainFit: int = 10000,
+    nLag: int = 2
 ) -> Dict:
     """
-    Fit MAR(1) (multivariate autoregressive) parameters.
+    Fit MAR(1) model for precipitation intensities.
+
+    Estimates both spatial dependence (M0) and temporal dependence (A):
+    Z_t = A @ Z_{t-1} + epsilon_t,  Cov(epsilon) = M0 - A @ M0 @ A^T
+
+    A is diagonal with per-station lag-1 autocorrelation coefficients
+    found by simulation matching via get_vec_autocor.
 
     Parameters
     ----------
-    P_mat : ndarray
+    P_mat : ndarray, shape (n_days, n_stations)
         Precipitation matrix
     is_period : ndarray
-        Boolean mask for period
+        Boolean mask for 3-month fitting window
     th : float
         Wet/dry threshold
-    parMargin : ndarray
+    parMargin : ndarray, shape (n_stations, 3)
         Marginal parameters
     typeMargin : str
-        Type of margin
+        Type of margin ('EGPD' or 'mixExp')
+    nChainFit : int, optional
+        Number of chain steps for simulation matching (default: 10000)
+    nLag : int, optional
+        Number of lag days for Markov chain (default: 2)
 
     Returns
     -------
     dict
-        MAR(1) fitted parameters including M0, A (autoregressive matrix), etc.
+        Keys: 'M0', 'A', 'covZ', 'sdZ', 'corZ'
     """
-    p = P_mat.shape[1]
+    P_period = P_mat[is_period, :]
+    p = P_period.shape[1]
 
-    # Placeholder for MAR(1) fitting
-    # This would estimate the autoregressive structure of the intensity process
+    # Step 1: Estimate spatial covariance M0
+    M0 = get_M0(P_mat, is_period, th, parMargin, typeMargin, nChainFit, nLag)
+
+    # Step 2: Compute observed lag-1 autocorrelations per station
+    Xt_obs = (P_period > th).astype(float)
+    vec_ar1_obs = np.zeros(p)
+    for st in range(p):
+        wet_vals = P_period[Xt_obs[:, st] == 1, st]
+        if len(wet_vals) > 2:
+            vec_ar1_obs[st] = np.corrcoef(wet_vals[:-1], wet_vals[1:])[0, 1]
+            if np.isnan(vec_ar1_obs[st]):
+                vec_ar1_obs[st] = 0.0
+
+    # Step 3: Find latent AR(1) coefficients via simulation matching
+    Xt_fit = Xt_obs[:min(nChainFit, len(Xt_obs)), :]
+    vec_rho = get_vec_autocor(
+        vec_ar1_obs=vec_ar1_obs,
+        Xt=Xt_fit,
+        parMargin=parMargin,
+        typeMargin=typeMargin,
+        nChainFit=len(Xt_fit)
+    )
+
+    # Step 4: Assemble diagonal A matrix
+    A = np.diag(vec_rho)
+
+    # Step 5: Innovation covariance: Cov(epsilon) = M0 - A @ M0 @ A^T
+    covZ = M0 - A @ M0 @ A.T
+
+    # Ensure positive-definiteness
+    covZ = modify_cor_matrix(covZ)
+
+    sdZ = np.sqrt(np.diag(M0))
+    corZ = M0.copy()
+
     return {
-        'M0': np.eye(p),
-        'A': np.eye(p) * 0.3,  # Modest autocorrelation
-        'covZ': np.eye(p),
-        'sdZ': np.ones(p),
-        'corZ': np.eye(p)
+        'M0': M0,
+        'A': A,
+        'covZ': covZ,
+        'sdZ': sdZ,
+        'corZ': corZ
     }
 
 

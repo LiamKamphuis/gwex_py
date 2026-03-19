@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gwex-py"
+version = "1.1.0"
+description = "Multi-site stochastic weather generator for daily precipitation (Python translation of GWEX R package, Evin et al. 2018)"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=1.5",
+]
+
+[tool.setuptools]
+packages = ["gwex_py"]
+
+[tool.setuptools.package-dir]
+gwex_py = "."
+
+[tool.mypy]
+ignore_missing_imports = true

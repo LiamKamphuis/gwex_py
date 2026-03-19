@@ -32,7 +32,7 @@ Author: Translated from Guillaume Evin's R code (GWEX package)
 import numpy as np
 from scipy.special import beta
 from scipy.stats import genpareto, uniform
-from scipy.optimize import fsolve, brentq
+from scipy.optimize import fsolve, brentq, least_squares
 from typing import Optional, Tuple, Union
 
 
@@ -372,8 +372,17 @@ def egpd_gi_fit_pwm(
     """
     Fit EGPD.GI distribution using Probability Weighted Moments.
 
-    Estimates the parameters (kappa, sig, xi) by solving the PWM equations
-    using numerical optimization. The shape parameter xi is fixed.
+    Estimates the parameters (kappa, sig) by solving the PWM equations
+    using bounded least-squares with multi-start. The shape parameter xi
+    is fixed (typically constrained via RFA).
+
+    Strategy:
+    1. Compute sample PWMs (mu0_hat, mu1_hat).
+    2. Use the PWM ratio mu1/mu0 to eliminate sigma and solve a 1-D
+       equation for kappa via brentq. This gives an analytical initial guess.
+    3. Refine (kappa, sigma) jointly with scipy.optimize.least_squares
+       using tight bounds (kappa > 0.01, sigma > 0).
+    4. Multi-start fallback over a grid of kappa values if step 2 fails.
 
     Parameters
     ----------
@@ -381,8 +390,6 @@ def egpd_gi_fit_pwm(
         Sample data (should be positive values above a threshold)
     xi : float, optional
         Shape parameter of the underlying GPD (default: 0.05).
-        This parameter is typically fixed based on prior knowledge or
-        a separate estimation procedure.
 
     Returns
     -------
@@ -393,76 +400,140 @@ def egpd_gi_fit_pwm(
         - 'sig' : estimated GPD scale parameter
         - 'xi' : fixed shape parameter
         - 'success' : bool indicating convergence success
-
-    Notes
-    -----
-    Uses scipy.optimize.fsolve with initial guesses:
-    - kappa: estimated from sample variance
-    - sig: estimated from sample mean
-
-    The numerical solution may be unstable if the data does not follow
-    the EGPD model well or if xi is far from optimal.
+        - 'nfev' : number of function evaluations
+        - 'residuals' : final residual vector
     """
-    x = np.asarray(x)
-    n = len(x)
+    x = np.asarray(x, dtype=float)
 
     # Compute sample PWM estimates
-    pwm_0 = _compute_pwm(x, k=0)
-    pwm_1 = _compute_pwm(x, k=1)
-    pwm = (pwm_0, pwm_1)
+    mu0_hat = _compute_pwm(x, k=0)
+    mu1_hat = _compute_pwm(x, k=1)
+    pwm = (mu0_hat, mu1_hat)
 
-    # Better initial guess based on sample statistics
-    # For exponential-like distribution, kappa is typically in (0.5, 3)
-    # sig is related to the mean
-    x_mean = np.mean(x)
-    x_std = np.std(x)
+    # --- Step 1: analytical initial guess via PWM ratio ---
+    # mu0 = (sig/xi)*(kappa*B(kappa,1-xi) - 1)
+    # mu1 = (sig/xi)*(kappa*(B(kappa,1-xi) - B(2*kappa,1-xi)) - 0.5)
+    # Ratio r = mu1/mu0 depends only on kappa (sig cancels).
+    initial_kappa = _solve_kappa_from_ratio(mu0_hat, mu1_hat, xi)
 
-    # Estimate kappa from coefficient of variation
-    cv = x_std / x_mean if x_mean > 0 else 1.0
-    initial_kappa = max(0.5, min(3.0, 2.0 / (cv + 0.1)))
+    if initial_kappa is not None:
+        # Recover sigma from mu0
+        bk = initial_kappa * beta(initial_kappa, 1.0 - xi) - 1.0
+        initial_sig = mu0_hat * xi / bk if abs(bk) > 1e-12 else np.mean(x) * 0.5
+        initial_sig = max(initial_sig, 1e-6)
+    else:
+        # Fallback: heuristic from sample statistics
+        x_mean = np.mean(x)
+        cv = np.std(x) / x_mean if x_mean > 0 else 1.0
+        initial_kappa = max(0.3, min(5.0, 2.0 / (cv + 0.1)))
+        initial_sig = max(x_mean * 0.5, 1e-6)
 
-    # sig estimate based on PWM
-    initial_sig = x_mean * 0.5
-
-    initial_guess = np.array([initial_kappa, initial_sig])
-
-    # Solve the system
-    sol, info, ier, mesg = fsolve(
-        egpd_gi_pwm_equations,
-        initial_guess,
-        args=(pwm, xi),
-        full_output=True,
-        xtol=1e-8
+    # --- Step 2: bounded least-squares refinement ---
+    best_result = _fit_pwm_least_squares(
+        float(initial_kappa), float(initial_sig), pwm, xi
     )
 
-    # Check success (ier == 1 means solution found)
-    success = ier == 1
+    # --- Step 3: multi-start fallback if first attempt failed ---
+    if not best_result['success']:
+        kappa_grid = [0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0]
+        for k0 in kappa_grid:
+            bk = k0 * beta(k0, 1.0 - xi) - 1.0
+            s0 = float(mu0_hat * xi / bk) if abs(bk) > 1e-12 else float(np.mean(x)) * 0.5
+            s0 = max(s0, 1e-6)
+            candidate = _fit_pwm_least_squares(k0, s0, pwm, xi)
+            if candidate['success'] and candidate['cost'] < best_result['cost']:
+                best_result = candidate
+        # Accept if cost is very small even without formal convergence
+        if not best_result['success'] and best_result['cost'] < 1e-10:
+            best_result['success'] = True
 
-    # Return in R-compatible format
+    sol_kappa = best_result['kappa']
+    sol_sig = best_result['sig']
+
     return {
-        'x': np.concatenate([sol, [xi]]),
-        'kappa': sol[0],
-        'sig': sol[1],
+        'x': np.array([sol_kappa, sol_sig, xi]),
+        'kappa': sol_kappa,
+        'sig': sol_sig,
         'xi': xi,
-        'success': success,
-        'nfev': info['nfev'],
-        'residuals': info['fvec'],
+        'success': best_result['success'],
+        'nfev': best_result['nfev'],
+        'residuals': best_result['residuals'],
     }
+
+
+def _solve_kappa_from_ratio(mu0_hat: float, mu1_hat: float, xi: float) -> Optional[float]:
+    """Solve for kappa using the PWM ratio mu1/mu0 (eliminates sigma)."""
+    if mu0_hat <= 0 or mu1_hat <= 0:
+        return None
+
+    r_target = mu1_hat / mu0_hat
+
+    def ratio_residual(kappa):
+        bk1 = kappa * beta(kappa, 1.0 - xi) - 1.0
+        bk2 = kappa * (beta(kappa, 1.0 - xi) - beta(2.0 * kappa, 1.0 - xi)) - 0.5
+        if abs(bk1) < 1e-15:
+            return 1.0
+        return bk2 / bk1 - r_target
+
+    try:
+        kappa: float = brentq(ratio_residual, 0.05, 50.0, xtol=1e-6)  # type: ignore[assignment]
+        return kappa
+    except (ValueError, RuntimeError):
+        return None
+
+
+def _fit_pwm_least_squares(
+    kappa0: float, sig0: float,
+    pwm: Tuple[float, float], xi: float
+) -> dict:
+    """Run bounded least_squares for (kappa, sig) given fixed xi."""
+    def residuals(par):
+        return egpd_gi_pwm_equations(par, pwm, xi)
+
+    try:
+        result = least_squares(
+            residuals,
+            x0=[kappa0, sig0],
+            bounds=([0.01, 1e-6], [100.0, 1e6]),
+            method='trf',
+            xtol=1e-10,
+            ftol=1e-10,
+            max_nfev=500
+        )
+        cost = float(np.sum(result.fun ** 2))
+        success = result.success and result.x[0] > 0.01 and result.x[1] > 0
+        return {
+            'kappa': float(result.x[0]),
+            'sig': float(result.x[1]),
+            'success': success,
+            'cost': cost,
+            'nfev': result.nfev,
+            'residuals': result.fun,
+        }
+    except Exception:
+        return {
+            'kappa': kappa0,
+            'sig': sig0,
+            'success': False,
+            'cost': np.inf,
+            'nfev': 0,
+            'residuals': np.array([np.inf, np.inf]),
+        }
 
 
 def _compute_pwm(x: np.ndarray, k: int = 0) -> float:
     """
-    Compute the k-th Probability Weighted Moment of a sample.
+    Compute the k-th Probability Weighted Moment (alpha convention).
 
-    The k-th PWM is defined as:
-    M_k = E[X * F(X)^k]
+    Uses the Hosking (1990) alpha convention:
+        alpha_k = E[X * (1 - F(X))^k]
 
-    where F is the empirical CDF.
+    This matches the EGPD theoretical PWM formulas (egpd_gi_mu0, mu1, mu2).
 
     Parameters
     ----------
     x : ndarray
-        Sample data, must be sorted
+        Sample data
     k : int, optional
         Order of the PWM (default: 0)
 
@@ -474,18 +545,17 @@ def _compute_pwm(x: np.ndarray, k: int = 0) -> float:
     x = np.sort(np.asarray(x))
     n = len(x)
 
-    # Use formula: M_k = (1/n) * sum_{j=1}^{n} x_j * (j-1 choose k) / (n-1 choose k)
-    # Equivalent to: M_k = (1/n) * sum_{j=1}^{n} x_j * prod_{i=0}^{k-1} (j-1-i)/(n-1-i)
+    # alpha_k = (1/n) * sum_{j=0}^{n-1} x_{(j+1)} * C(n-1-j, k) / C(n-1, k)
+    # Product form: weight = prod_{i=0}^{k-1} (n-1-j-i) / (n-1-i)
 
     pwm = 0.0
     for j in range(n):
-        # Weight: (j choose k) / (n choose k)
         if k == 0:
             weight = 1.0
         else:
             weight = 1.0
             for i in range(k):
-                weight *= (j - i) / (n - 1 - i)
+                weight *= (n - 1 - j - i) / (n - 1 - i)
 
         pwm += weight * x[j] / n
 
