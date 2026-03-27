@@ -268,6 +268,7 @@ def fit_gwex_model(
     obs: GwexObs,
     par_margin: Optional[List[np.ndarray]] = None,
     list_option: Optional[Dict[str, Any]] = None,
+    n_fit_workers: int = 1,
 ) -> GwexFit:
     """
     Fit a GWEX model to observations.
@@ -329,7 +330,8 @@ def fit_gwex_model(
     # Import fitting functions from sibling modules
     if type_var == 'Prec':
         from .precipitation import fit_GWex_prec
-        fit_result = fit_GWex_prec(obs, par_margin, list_option)
+        fit_result = fit_GWex_prec(obs, par_margin, list_option,
+                                   n_fit_workers=n_fit_workers)
     elif type_var == 'Temp':
         raise NotImplementedError(
             "Temperature model is not yet implemented in gwex_py. "

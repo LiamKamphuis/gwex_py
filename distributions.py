@@ -833,6 +833,13 @@ def unif_to_prec(
     if distribution_type not in ('EGPD', 'mixExp'):
         raise ValueError("distribution_type must be 'EGPD' or 'mixExp'")
 
+    # Clip u away from 1.0 to prevent infinite quantiles.
+    # When the copula/MAR(1) generates extreme Gaussian values, norm.cdf()
+    # saturates to 1.0 in float64, and ppf_egpd_gi(1.0, ..., xi>0) = inf.
+    # Clipping to 1 - 1e-9 caps the EGPD quantile at a physically plausible
+    # extreme (e.g. ~300 mm for typical tropical daily precipitation params).
+    u = np.clip(u, 0.0, 1.0 - 1e-9)
+
     if distribution_type == 'EGPD':
         return ppf_egpd_gi(u, params[0], params[1], params[2])
     else:  # 'mixExp'

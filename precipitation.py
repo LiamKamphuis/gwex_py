@@ -110,7 +110,8 @@ def infer_mat_omega(
     n_comb = 2 ** nLag
 
     # Matrix of possible wet/dry combinations
-    mat_comb = pr_state[0][list(range(-nLag, 0))].values.astype(bool)
+    lag_cols = [f't{i}' for i in range(-nLag, 0)]
+    mat_comb = pr_state[0][lag_cols].values.astype(bool)
 
     # Transition probabilities to normal quantiles
     Ptrans_list = [pr_state[i_st]['P'].values for i_st in range(len(pr_state))]
@@ -936,10 +937,94 @@ def fit_MAR1_amount(
 # =============================================================================
 
 
+def _fit_one_month(args: Tuple) -> Tuple:
+    """Fit all GWEX parameters for a single month.
+
+    Designed as a module-level function so it is picklable for
+    multiprocessing.Pool.  Receives and returns plain tuples to
+    avoid serialisation issues with complex objects.
+    """
+    import warnings
+    (iMonth, P_mat, vec_month, vec_month_char, p,
+     parMargin_month, listOption) = args
+
+    m_char = vec_month_char[iMonth]
+
+    # Get 3-month fitting window
+    period_m = get_period_fitting_month(m_char)
+    is_3month_period = np.isin(vec_month, period_m)
+    is_month = vec_month == (iMonth + 1)
+
+    # --- Wet/dry transition probabilities ---
+    pr_state = lag_trans_proba_matrix(
+        P_mat, is_month, listOption['th'], listOption['nLag']
+    )
+    pr_state_list = [pr_state[i] for i in range(p)]
+
+    # --- Marginal distributions ---
+    if parMargin_month is None:
+        parMargin_month = fit_margin_cdf(
+            P_mat, is_month, listOption['th'], listOption['typeMargin']
+        )
+
+    # --- Spatial process for occurrences ---
+    if p == 1:
+        infer_mat_omega_out = None
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            infer_mat_omega_out = infer_mat_omega(
+                P_mat,
+                is_3month_period,
+                listOption['th'],
+                listOption['nLag'],
+                pr_state_list,
+                listOption['nChainFit'],
+                listOption['isParallel']
+            )
+
+    # --- Spatial process for intensities ---
+    if p == 1:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            infer_dep_amount_out = infer_autocor_amount(
+                P_mat,
+                pr_state_list,
+                is_3month_period,
+                listOption['nLag'],
+                listOption['th'],
+                parMargin_month,
+                listOption['typeMargin'],
+                listOption['nChainFit'],
+                listOption['isMAR'],
+                listOption['isParallel']
+            )
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            infer_dep_amount_out = infer_dep_amount(
+                P_mat,
+                is_3month_period,
+                infer_mat_omega_out,
+                listOption['nLag'],
+                listOption['th'],
+                parMargin_month,
+                listOption['typeMargin'],
+                listOption['nChainFit'],
+                listOption['isMAR'],
+                listOption['copulaInt'],
+                listOption['isParallel']
+            )
+
+    return (iMonth, pr_state_list, parMargin_month,
+            infer_mat_omega_out, infer_dep_amount_out)
+
+
 def fit_GWex_prec(
     objGwexObs: "GwexObs",
     parMargin: Optional[List[np.ndarray]] = None,
-    listOption: Optional[Dict] = None
+    listOption: Optional[Dict] = None,
+    n_fit_workers: int = 1,
 ) -> Dict:
     """
     Main function to fit the GWEX precipitation model.
@@ -961,6 +1046,9 @@ def fit_GWex_prec(
         Each element should be ndarray of shape (n_stations, 3).
     listOption : dict, optional
         Options for fitting (see get_list_option)
+    n_fit_workers : int, optional
+        Number of parallel workers for month-level fitting.  1 = sequential
+        (default).  Up to 12 workers can be used (one per month).
 
     Returns
     -------
@@ -1011,84 +1099,51 @@ def fit_GWex_prec(
             if parMargin[iM].shape != (p, 3):
                 raise ValueError(f"parMargin[{iM}] has wrong shape")
 
-    # ========== Prepare results ==========
-    list_pr_state = []
-    list_parMargin = []
-    list_mat_omega = []
-    list_par_dep_amount = []
-
-    # ========== Fit for each month ==========
+    # ========== Build per-month argument tuples ==========
+    month_args = []
     for iMonth in range(12):
-        m_char = vec_month_char[iMonth]
+        pm = parMargin[iMonth] if parMargin is not None else None
+        month_args.append((
+            iMonth, P_mat, vec_month, vec_month_char, p,
+            pm, listOption,
+        ))
 
-        # Get 3-month fitting window
-        period_m = get_period_fitting_month(m_char)
+    # ========== Fit months (parallel or sequential) ==========
+    n_fit_workers = max(1, min(n_fit_workers, 12))
 
-        # Identify days in this month and 3-month window
-        is_3month_period = np.isin(vec_month, period_m)
-        is_month = vec_month == (iMonth + 1)
+    if n_fit_workers > 1:
+        import multiprocessing as _mp
+        print(f"  [gwex fit] fitting 12 months with {n_fit_workers} parallel workers ...",
+              flush=True)
+        with _mp.Pool(n_fit_workers) as pool:
+            results = []
+            for result in pool.imap_unordered(_fit_one_month, month_args):
+                iM = result[0]
+                m_char = vec_month_char[iM]
+                print(f"  [gwex fit] month {iM+1:02d}/12 ({m_char}) done", flush=True)
+                results.append(result)
+        # Sort by month index
+        results.sort(key=lambda x: x[0])
+    else:
+        results = []
+        for args in month_args:
+            iMonth = args[0]
+            m_char = vec_month_char[iMonth]
+            print(f"  [gwex fit] month {iMonth+1:02d}/12 ({m_char}) ...", flush=True)
+            results.append(_fit_one_month(args))
 
-        # --- Wet/dry transition probabilities ---
-        pr_state = lag_trans_proba_matrix(
-            P_mat, is_month, listOption['th'], listOption['nLag']
-        )
-        # Convert dict to list of DataFrames
-        pr_state_list = [pr_state[i] for i in range(p)]
-        list_pr_state.append(pr_state_list)
+    # ========== Unpack results ==========
+    list_pr_state = [None] * 12
+    list_parMargin = [None] * 12
+    list_mat_omega = [None] * 12
+    list_par_dep_amount = [None] * 12
 
-        # --- Marginal distributions ---
-        if parMargin is None:
-            parMargin_month = fit_margin_cdf(
-                P_mat, is_month, listOption['th'], listOption['typeMargin']
-            )
-        else:
-            parMargin_month = parMargin[iMonth]
-        list_parMargin.append(parMargin_month)
-
-        # --- Spatial process for occurrences ---
-        if p == 1:
-            infer_mat_omega_out = None
-        else:
-            infer_mat_omega_out = infer_mat_omega(
-                P_mat,
-                is_3month_period,
-                listOption['th'],
-                listOption['nLag'],
-                pr_state_list,
-                listOption['nChainFit'],
-                listOption['isParallel']
-            )
-        list_mat_omega.append(infer_mat_omega_out)
-
-        # --- Spatial process for intensities ---
-        if p == 1:
-            infer_dep_amount_out = infer_autocor_amount(
-                P_mat,
-                pr_state_list,
-                is_3month_period,
-                listOption['nLag'],
-                listOption['th'],
-                parMargin_month,
-                listOption['typeMargin'],
-                listOption['nChainFit'],
-                listOption['isMAR'],
-                listOption['isParallel']
-            )
-        else:
-            infer_dep_amount_out = infer_dep_amount(
-                P_mat,
-                is_3month_period,
-                infer_mat_omega_out,
-                listOption['nLag'],
-                listOption['th'],
-                parMargin_month,
-                listOption['typeMargin'],
-                listOption['nChainFit'],
-                listOption['isMAR'],
-                listOption['copulaInt'],
-                listOption['isParallel']
-            )
-        list_par_dep_amount.append(infer_dep_amount_out)
+    for (iMonth, pr_state_list, parMargin_month,
+         infer_mat_omega_out, infer_dep_amount_out) in results:
+        list_pr_state[iMonth] = pr_state_list
+        list_parMargin[iMonth] = parMargin_month
+        list_mat_omega[iMonth] = infer_mat_omega_out
+        list_par_dep_amount[iMonth] = infer_dep_amount_out
 
     # ========== Prepare output ==========
     listPar = {
@@ -1154,7 +1209,8 @@ def sim_GWex_occ(
     parOcc = objGwexFit['listPar']['parOcc']
 
     # Matrix of combinations from first month
-    mat_comb = parOcc['list_pr_state'][0][0][list(range(-nLag, 0))].values.astype(bool)
+    lag_cols = [f't{i}' for i in range(-nLag, 0)]
+    mat_comb = parOcc['list_pr_state'][0][0][lag_cols].values.astype(bool)
 
     # Fill transition quantiles and generate random normals
     for t in range(n):
@@ -1514,12 +1570,35 @@ def _sim_Zt_MAR(
     covZ = par.get('covZ', np.eye(p))
     sdZ = par.get('sdZ', np.ones(p))
 
-    # MAR(1): Y(t) = A @ Y(t-1) + e
-    # where cov(e) = covZ - A @ cov(Y) @ A^T
-    mean_ar = A @ Yt_prev
+    # MAR(1): Y(t) = A @ Y(t-1) + e, where cov(e) = covZ - A covZ A^T.
+    # When (A, covZ) are inconsistent (common with short MCMC chains),
+    # cov_e can have negative eigenvalues.  Rather than patching cov_e
+    # directly (which distorts the covariance structure), shrink A toward
+    # zero until cov_e is PSD.  This conservatively reduces temporal
+    # dependence when the model can't support it, preserving the fitted
+    # spatial correlation structure in covZ.
     cov_e = covZ - A @ covZ @ A.T
-    cov_e = np.maximum(cov_e, np.eye(p) * 1e-6)  # Ensure positive definite
+    cov_e = 0.5 * (cov_e + cov_e.T)
+    min_eig = np.min(np.linalg.eigvalsh(cov_e))
 
+    if min_eig < 1e-6:
+        # Binary search for largest shrinkage factor α ∈ [0, 1] such that
+        # covZ - (α·A) covZ (α·A)^T is PSD.  α=0 always works (cov_e = covZ).
+        lo, hi = 0.0, 1.0
+        for _ in range(20):
+            mid = 0.5 * (lo + hi)
+            A_mid = mid * A
+            ce = covZ - A_mid @ covZ @ A_mid.T
+            ce = 0.5 * (ce + ce.T)
+            if np.min(np.linalg.eigvalsh(ce)) >= 1e-6:
+                lo = mid
+            else:
+                hi = mid
+        A = lo * A
+        cov_e = covZ - A @ covZ @ A.T
+        cov_e = 0.5 * (cov_e + cov_e.T)
+
+    mean_ar = A @ Yt_prev
     e = np.random.multivariate_normal(mean=np.zeros(p), cov=cov_e)
 
     return mean_ar + e

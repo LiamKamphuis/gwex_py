@@ -83,8 +83,10 @@ def lag_trans_proba_vector(vec_prec, is_period, th, nlag):
     """
     ndays = nlag + 1
 
-    # Get indices of days in this period
+    # Get indices of days in this period, excluding those too close to the
+    # end of the record (where the nlag look-ahead would exceed array bounds)
     ind_is_period = np.where(is_period)[0]
+    ind_is_period = ind_is_period[ind_is_period + nlag < len(vec_prec)]
 
     # Build matrix of wet/dry indicators for current and previous nlag days
     iswetlag = np.zeros((len(ind_is_period), ndays), dtype=bool)
